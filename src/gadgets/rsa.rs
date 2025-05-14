@@ -56,7 +56,7 @@ fn pow_65537(
     value: &BigUintTarget,
     modulus: &BigUintTarget,
 ) -> BigUintTarget {
-    // TODO: Implement the circuit to raise value to the power 65537 mod modulus 
+    // TODO: Implement the circuit to raise value to the power 65537 mod modulus
     unimplemented!("TODO: Implement the circuit to raise value to the power 65537 mod modulus");
     // HINT: 65537 = 2^16 + 1. Can you use this to exponentiate efficiently?
 }
@@ -92,9 +92,21 @@ pub fn compute_hash(message: &[GoldilocksField]) -> BigUint {
 /// Pads the message hash with PKCS#1 v1.5 padding in the circuit
 /// Padding will look like: 0x00 || 0x01 || 0xff...ff || 0x00 || hash
 pub fn compute_padded_hash(message_hash: &BigUint) -> BigUint {
-    // TODO: Compute the value of the padded hash for witness generation
-    unimplemented!("TODO: Compute the value of the padded hash for witness generation");
-    // HINT: The size of the message hash is always HASH_BYTES
+    // The size of the message hash is always HASH_BYTES
+    let mut bytes_vec: Vec<u8> = vec![255; RSA_MODULUS_BYTES - HASH_BYTES - 3];
+    bytes_vec.insert(0, 1);
+    bytes_vec.insert(0, 0);
+    bytes_vec.push(0);
+
+    let mut hashes_vec = BigUint::to_bytes_be(message_hash);
+    while hashes_vec.len() < HASH_BYTES {
+        hashes_vec.insert(0, 0);
+    }
+
+    bytes_vec.append(&mut hashes_vec);
+    let bytes_slice: &[u8] = &bytes_vec;
+    let pad = BigUint::from_bytes_be(&bytes_slice);
+    pad.clone()
 }
 
 pub fn create_ring_circuit(max_num_pks: usize) -> RingSignatureCircuit {
@@ -117,8 +129,13 @@ pub fn create_ring_circuit(max_num_pks: usize) -> RingSignatureCircuit {
     // TODO: Add additional targets for the signature and public keys
     unimplemented!("TODO: Add additional targets for the signature and public keys");
 
-    // TODO: Construct SNARK circuit for relation R 
+    // TODO: Construct SNARK circuit for relation R
     unimplemented!("TODO: Build SNARK circuit for relation R");
+
+    //for build sake
+
+    let pk_targets = vec![sig_pk_target];
+    let sig_target = sig_pk_target;
 
     // Build the circuit and return it
     let data = builder.build::<C>();
@@ -170,6 +187,7 @@ mod test {
     #[test]
     fn test_compute_padded_hash() {
         let message_hash = BigUint::from_u64(0x12345678).unwrap();
+
         let expected_padded_hash = BigUint::parse_bytes(
             "1ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\
             ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\
@@ -232,4 +250,3 @@ mod test {
         circuit.circuit.verify(proof).unwrap();
     }
 }
-
