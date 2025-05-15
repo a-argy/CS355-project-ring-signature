@@ -2,13 +2,15 @@ use super::biguint::{BigUintTarget, CircuitBuilderBiguint};
 use super::biguint::{CircuitBuilderBiguintFromField, WitnessBigUint};
 use crate::gadgets::serialize::serialize_circuit_data;
 use crate::rsa::{RSADigest, RSAKeypair, RSAPubkey};
-use num::BigUint;
 use num::FromPrimitive;
+use num::{BigUint, pow};
 use num_traits::Zero;
 use plonky2::field::goldilocks_field::GoldilocksField;
 use plonky2::field::types::Field64;
 use plonky2::hash::poseidon::PoseidonHash;
 use plonky2::iop::generator::generate_partial_witness;
+use plonky2::iop::target::BoolTarget;
+//added this
 use plonky2::iop::target::Target;
 use plonky2::iop::witness::PartialWitness;
 use plonky2::plonk::circuit_data::{CircuitConfig, CircuitData};
@@ -37,6 +39,9 @@ const HASH_BYTES: usize = <PoseidonHash as Hasher<GoldilocksField>>::HASH_SIZE;
 pub struct RingSignatureCircuit {
     #[serde(with = "serialize_circuit_data")]
     pub circuit: CircuitData<F, C, D>,
+    // hack input targets
+    pub zero_target: BigUintTarget,
+    pub one_target: BigUintTarget,
     // public input targets
     pub padded_hash_target: BigUintTarget,
     pub pk_targets: Vec<BigUintTarget>,
@@ -56,9 +61,15 @@ fn pow_65537(
     value: &BigUintTarget,
     modulus: &BigUintTarget,
 ) -> BigUintTarget {
-    // TODO: Implement the circuit to raise value to the power 65537 mod modulus
-    unimplemented!("TODO: Implement the circuit to raise value to the power 65537 mod modulus");
-    // HINT: 65537 = 2^16 + 1. Can you use this to exponentiate efficiently?
+    // 65537 = 2^16 + 1
+    let squared_target = builder.mul_biguint(value, value);
+    let mut pow_target = builder.mul_biguint(&squared_target, &squared_target);
+    for _ in 0..15 {
+        pow_target = builder.mul_biguint(&squared_target, &pow_target);
+    }
+    let e_target = builder.mul_biguint(&pow_target, &value);
+    let mod_target = builder.rem_biguint(modulus, &e_target);
+    mod_target
 }
 
 /// Circuit which computes a hash target from a message
@@ -127,20 +138,53 @@ pub fn create_ring_circuit(max_num_pks: usize) -> RingSignatureCircuit {
     builder.connect(modulus_is_zero.target, zero);
 
     // TODO: Add additional targets for the signature and public keys
-    unimplemented!("TODO: Add additional targets for the signature and public keys");
+    let mut pk_targets: Vec<BigUintTarget> = Vec::new();
+    for _ in [0..max_num_pks] {
+        pk_targets.push(builder.add_virtual_biguint_target(64));
+    }
+
+    let sig_target = builder.add_virtual_biguint_target(64);
 
     // TODO: Construct SNARK circuit for relation R
-    unimplemented!("TODO: Build SNARK circuit for relation R");
+    let pow_target = pow_65537(&mut builder, &sig_target, &sig_pk_target);
+    let verifier = builder.eq_biguint(&padded_hash_target, &pow_target);
+    let one = builder.one();
+    builder.connect(verifier.target, one);
 
-    //for build sake
+    // let mut key_check = builder.eq_biguint(&sig_pk_target, &pk_targets[0]);
+    // let next_key_check = builder.eq_biguint(&sig_pk_target, &pk_targets[1]);
+    // let mut or_target = builder.or(key_check, next_key_check);
 
-    let pk_targets = vec![sig_pk_target];
-    let sig_target = sig_pk_target;
+    // for key_target in &pk_targets[2..] {
+    //     key_check = builder.eq_biguint(&sig_pk_target, &key_target);
+    //     or_target = builder.or(or_target, key_check);
+    // }
+
+    let mut key_check = builder.eq_biguint(&sig_pk_target, &pk_targets[0]);
+    // need a way to hack a BoolTarget of 0
+    let zero_target = builder.add_virtual_biguint_target(64);
+    let one_target = builder.add_virtual_biguint_target(64);
+    let zero_booltarget = builder.eq_biguint(&one_target, &zero_target);
+    let mut or_target = builder.or(key_check, zero_booltarget);
+
+    for key_target in &pk_targets[1..] {
+        key_check = builder.eq_biguint(&sig_pk_target, &key_target);
+        or_target = builder.or(or_target, key_check);
+    }
+
+    let one = builder.one();
+    builder.connect(or_target.target, one);
+
+    println!("in func");
 
     // Build the circuit and return it
     let data = builder.build::<C>();
+    println!("built in func");
+
     return RingSignatureCircuit {
         circuit: data,
+        zero_target,
+        one_target,
         padded_hash_target,
         pk_targets,
         sig_target,
@@ -172,7 +216,22 @@ pub fn create_ring_proof(
     pw.set_biguint_target(&circuit.sig_pk_target, &pk_val.n)?;
 
     // TODO: Set your additional targets in the partial witness
-    unimplemented!("TODO: Set your additional targets in the partial witness");
+    // set our hacky zero bool target
+    pw.set_biguint_target(&circuit.zero_target, &BigUint::from_u32(0).unwrap());
+    pw.set_biguint_target(&circuit.one_target, &BigUint::from_u32(1).unwrap());
+
+    for n in 0..circuit.pk_targets.len() {
+        if n < public_keys.len() {
+            pw.set_biguint_target(&circuit.pk_targets[n], &public_keys[n].n);
+        } else {
+            pw.set_biguint_target(&circuit.pk_targets[n], &BigUint::from_u32(0).unwrap());
+        }
+    }
+
+    // let signature = rsa_sign(&padded_hash, private_key., &pk_val.n);
+
+    pw.set_biguint_target(&circuit.sig_target, &sig_val.sig);
+    pw.set_biguint_target(&circuit.padded_hash_target, &padded_hash);
 
     let proof = circuit.circuit.prove(pw)?;
     // check that the proof verifies
@@ -229,6 +288,7 @@ mod test {
 
     #[test]
     fn public_inputs_should_be_correct() {
+        println!("Starting test");
         let private_key = RSAKeypair::new();
         let mut public_keys = vec![private_key.get_pubkey()];
         public_keys.resize(5, RSAKeypair::new().get_pubkey());
@@ -237,7 +297,9 @@ mod test {
             GoldilocksField(20),
             GoldilocksField(23),
         ];
+        println!("Created keys and message");
         let circuit = create_ring_circuit(5);
+        println!("Created circuit");
         let proof = create_ring_proof(&circuit, &public_keys, &private_key, &message).unwrap();
 
         use crate::utils::verify_ring_signature_proof_public_inputs_fields;
