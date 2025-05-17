@@ -9,8 +9,6 @@ use plonky2::field::goldilocks_field::GoldilocksField;
 use plonky2::field::types::Field64;
 use plonky2::hash::poseidon::PoseidonHash;
 use plonky2::iop::generator::generate_partial_witness;
-use plonky2::iop::target::BoolTarget;
-//added this
 use plonky2::iop::target::Target;
 use plonky2::iop::witness::PartialWitness;
 use plonky2::plonk::circuit_data::{CircuitConfig, CircuitData};
@@ -39,9 +37,6 @@ const HASH_BYTES: usize = <PoseidonHash as Hasher<GoldilocksField>>::HASH_SIZE;
 pub struct RingSignatureCircuit {
     #[serde(with = "serialize_circuit_data")]
     pub circuit: CircuitData<F, C, D>,
-    // hack input targets
-    pub zero_target: BigUintTarget,
-    pub one_target: BigUintTarget,
     // public input targets
     pub padded_hash_target: BigUintTarget,
     pub pk_targets: Vec<BigUintTarget>,
@@ -62,14 +57,15 @@ fn pow_65537(
     modulus: &BigUintTarget,
 ) -> BigUintTarget {
     // 65537 = 2^16 + 1
-    let squared_target = builder.mul_biguint(value, value);
-    let mut pow_target = builder.mul_biguint(&squared_target, &squared_target);
+    let mut squared_target = builder.mul_biguint(value, value);
+    squared_target = builder.rem_biguint(&squared_target, modulus);
     for _ in 0..15 {
-        pow_target = builder.mul_biguint(&squared_target, &pow_target);
+        squared_target = builder.mul_biguint(&squared_target, &squared_target);
+        squared_target = builder.rem_biguint(&squared_target, modulus);
     }
-    let e_target = builder.mul_biguint(&pow_target, &value);
-    let mod_target = builder.rem_biguint(modulus, &e_target);
-    mod_target
+    let mut e_target = builder.mul_biguint(&squared_target, &value);
+    e_target = builder.rem_biguint(&e_target, modulus);
+    e_target
 }
 
 /// Circuit which computes a hash target from a message
@@ -124,6 +120,9 @@ pub fn create_ring_circuit(max_num_pks: usize) -> RingSignatureCircuit {
     let config = CircuitConfig::standard_recursion_zk_config();
     let mut builder = CircuitBuilder::<F, D>::new(config);
 
+    let zero = builder.zero();
+    let one = builder.one();
+
     // Add circuit targets
     let padded_hash_target = builder.add_virtual_public_biguint_target(64);
     let sig_pk_target = builder.add_virtual_biguint_target(64);
@@ -133,58 +132,40 @@ pub fn create_ring_circuit(max_num_pks: usize) -> RingSignatureCircuit {
     let zero_biguint = builder.zero_biguint();
     // Constrain modulus_is_zero to be 1 if sig_pk_target == 0, and 0 otherwise
     let modulus_is_zero = builder.eq_biguint(&sig_pk_target, &zero_biguint);
-    let zero = builder.zero();
+
     // Ensure modulus_is_zero is 0 (aka false)
     builder.connect(modulus_is_zero.target, zero);
 
-    // TODO: Add additional targets for the signature and public keys
+    // Add additional
     let mut pk_targets: Vec<BigUintTarget> = Vec::new();
-    for _ in [0..max_num_pks] {
-        pk_targets.push(builder.add_virtual_biguint_target(64));
+    for _ in 0..max_num_pks {
+        pk_targets.push(builder.add_virtual_public_biguint_target(64));
     }
 
     let sig_target = builder.add_virtual_biguint_target(64);
 
-    // TODO: Construct SNARK circuit for relation R
+    // Check signature verification
     let pow_target = pow_65537(&mut builder, &sig_target, &sig_pk_target);
     let verifier = builder.eq_biguint(&padded_hash_target, &pow_target);
-    let one = builder.one();
+
     builder.connect(verifier.target, one);
 
-    // let mut key_check = builder.eq_biguint(&sig_pk_target, &pk_targets[0]);
-    // let next_key_check = builder.eq_biguint(&sig_pk_target, &pk_targets[1]);
-    // let mut or_target = builder.or(key_check, next_key_check);
-
-    // for key_target in &pk_targets[2..] {
-    //     key_check = builder.eq_biguint(&sig_pk_target, &key_target);
-    //     or_target = builder.or(or_target, key_check);
-    // }
-
-    let mut key_check = builder.eq_biguint(&sig_pk_target, &pk_targets[0]);
-    // need a way to hack a BoolTarget of 0
-    let zero_target = builder.add_virtual_biguint_target(64);
-    let one_target = builder.add_virtual_biguint_target(64);
-    let zero_booltarget = builder.eq_biguint(&one_target, &zero_target);
-    let mut or_target = builder.or(key_check, zero_booltarget);
+    // Check pk is in the ring
+    let key_check = builder.eq_biguint(&sig_pk_target, &pk_targets[0]);
+    let mut or_target = key_check;
 
     for key_target in &pk_targets[1..] {
-        key_check = builder.eq_biguint(&sig_pk_target, &key_target);
-        or_target = builder.or(or_target, key_check);
+        let key_check2 = builder.eq_biguint(&sig_pk_target, &key_target);
+        or_target = builder.or(or_target, key_check2);
     }
 
-    let one = builder.one();
     builder.connect(or_target.target, one);
-
-    println!("in func");
 
     // Build the circuit and return it
     let data = builder.build::<C>();
-    println!("built in func");
 
     return RingSignatureCircuit {
         circuit: data,
-        zero_target,
-        one_target,
         padded_hash_target,
         pk_targets,
         sig_target,
@@ -215,25 +196,16 @@ pub fn create_ring_proof(
     // Set the witness values in pw
     pw.set_biguint_target(&circuit.sig_pk_target, &pk_val.n)?;
 
-    // TODO: Set your additional targets in the partial witness
-    // set our hacky zero bool target
-    pw.set_biguint_target(&circuit.zero_target, &BigUint::from_u32(0).unwrap());
-    pw.set_biguint_target(&circuit.one_target, &BigUint::from_u32(1).unwrap());
-
-    for n in 0..circuit.pk_targets.len() {
-        if n < public_keys.len() {
-            pw.set_biguint_target(&circuit.pk_targets[n], &public_keys[n].n);
-        } else {
-            pw.set_biguint_target(&circuit.pk_targets[n], &BigUint::from_u32(0).unwrap());
-        }
+    // Set your additional targets in the partial witness
+    for n in 0..public_keys.len() {
+        pw.set_biguint_target(&circuit.pk_targets[n], &public_keys[n].n)?;
     }
 
-    // let signature = rsa_sign(&padded_hash, private_key., &pk_val.n);
-
-    pw.set_biguint_target(&circuit.sig_target, &sig_val.sig);
-    pw.set_biguint_target(&circuit.padded_hash_target, &padded_hash);
+    pw.set_biguint_target(&circuit.sig_target, &sig_val.sig)?;
+    pw.set_biguint_target(&circuit.padded_hash_target, &padded_hash)?;
 
     let proof = circuit.circuit.prove(pw)?;
+
     // check that the proof verifies
     circuit.circuit.verify(proof.clone())?;
     Ok(proof)
