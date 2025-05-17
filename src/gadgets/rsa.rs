@@ -57,9 +57,8 @@ fn pow_65537(
     modulus: &BigUintTarget,
 ) -> BigUintTarget {
     // 65537 = 2^16 + 1
-    let mut squared_target = builder.mul_biguint(value, value);
-    squared_target = builder.rem_biguint(&squared_target, modulus);
-    for _ in 0..15 {
+    let mut squared_target = value.clone();
+    for _ in 0..16 {
         squared_target = builder.mul_biguint(&squared_target, &squared_target);
         squared_target = builder.rem_biguint(&squared_target, modulus);
     }
@@ -260,7 +259,6 @@ mod test {
 
     #[test]
     fn public_inputs_should_be_correct() {
-        println!("Starting test");
         let private_key = RSAKeypair::new();
         let mut public_keys = vec![private_key.get_pubkey()];
         public_keys.resize(5, RSAKeypair::new().get_pubkey());
@@ -269,9 +267,7 @@ mod test {
             GoldilocksField(20),
             GoldilocksField(23),
         ];
-        println!("Created keys and message");
         let circuit = create_ring_circuit(5);
-        println!("Created circuit");
         let proof = create_ring_proof(&circuit, &public_keys, &private_key, &message).unwrap();
 
         use crate::utils::verify_ring_signature_proof_public_inputs_fields;
